@@ -4,7 +4,6 @@ import com.costwise.model.AwsAccount;
 import com.costwise.model.CostAnalysisRun;
 import com.costwise.model.OptimizationResult;
 import com.costwise.repository.CostAnalysisRunRepository;
-import com.costwise.repository.OptimizationResultRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -22,7 +21,6 @@ import java.util.List;
 @RequiredArgsConstructor
 public class AwsCostAnalysisService {
     private final CostAnalysisRunRepository costAnalysisRunRepository;
-    private final OptimizationResultRepository optimizationResultRepository;
 
     @Transactional
     public CostAnalysisRun analyzeCosts(AwsAccount awsAccount, LocalDateTime startDate, LocalDateTime endDate) {
