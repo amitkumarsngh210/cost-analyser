@@ -7,6 +7,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
+import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+import software.amazon.awssdk.services.cloudwatch.model.*;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.*;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -18,6 +20,8 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.*;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.*;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -25,6 +29,9 @@ import java.util.List;
 @Service
 @RequiredArgsConstructor
 public class AwsResourceAnalyzer {
+
+    private static final double CPU_UTILIZATION_THRESHOLD = 20.0;
+    private static final int LOOKBACK_DAYS = 7;
 
     public List<OptimizationResult> analyzeResources(AwsAccount account) {
         List<OptimizationResult> results = new ArrayList<>();
@@ -47,6 +54,9 @@ public class AwsResourceAnalyzer {
         List<OptimizationResult> results = new ArrayList<>();
         
         try (Ec2Client ec2Client = Ec2Client.builder()
+                .region(software.amazon.awssdk.regions.Region.of(account.getRegion()))
+                .build();
+             CloudWatchClient cloudWatchClient = CloudWatchClient.builder()
                 .region(software.amazon.awssdk.regions.Region.of(account.getRegion()))
                 .build()) {
 
@@ -76,12 +86,58 @@ public class AwsResourceAnalyzer {
                             result.setSeverity("LOW");
                             results.add(result);
                         }
+
+                        // Check CPU utilization for last 7 days
+                        if (isInstanceUnderutilized(cloudWatchClient, instance.instanceId())) {
+                            OptimizationResult result = new OptimizationResult();
+                            result.setResourceType("EC2");
+                            result.setResourceId(instance.instanceId());
+                            result.setCurrentState("Low CPU utilization (< 20%) for the last 7 days");
+                            result.setSuggestedAction("Consider downsizing the instance to save costs");
+                            result.setSeverity("HIGH");
+                            results.add(result);
+                        }
                     }
                 }
             }
         }
         
         return results;
+    }
+
+    private boolean isInstanceUnderutilized(CloudWatchClient cloudWatchClient, String instanceId) {
+        try {
+            Instant endTime = Instant.now();
+            Instant startTime = endTime.minus(LOOKBACK_DAYS, ChronoUnit.DAYS);
+
+            GetMetricStatisticsRequest request = GetMetricStatisticsRequest.builder()
+                .namespace("AWS/EC2")
+                .metricName("CPUUtilization")
+                .dimensions(Dimension.builder()
+                    .name("InstanceId")
+                    .value(instanceId)
+                    .build())
+                .startTime(startTime)
+                .endTime(endTime)
+                .period(3600) // 1 hour intervals
+                .statistics(Statistic.MAXIMUM)
+                .build();
+
+            GetMetricStatisticsResponse response = cloudWatchClient.getMetricStatistics(request);
+            
+            // Check if we have data points
+            if (response.datapoints().isEmpty()) {
+                return false;
+            }
+
+            // Check if any data point exceeds the threshold
+            return response.datapoints().stream()
+                .noneMatch(point -> point.maximum() > CPU_UTILIZATION_THRESHOLD);
+
+        } catch (Exception e) {
+            log.error("Error checking CPU utilization for instance {}: {}", instanceId, e.getMessage());
+            return false;
+        }
     }
 
     private List<OptimizationResult> analyzeRDSInstances(AwsAccount account) {
