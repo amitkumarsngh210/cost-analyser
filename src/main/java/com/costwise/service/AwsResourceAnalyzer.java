@@ -5,10 +5,6 @@ import com.costwise.model.OptimizationResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.*;
-import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
-import software.amazon.awssdk.services.cloudwatch.model.*;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.*;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -20,8 +16,6 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.*;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.*;
 
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -29,15 +23,16 @@ import java.util.List;
 @Service
 @RequiredArgsConstructor
 public class AwsResourceAnalyzer {
-
-    private static final double CPU_UTILIZATION_THRESHOLD = 20.0;
-    private static final int LOOKBACK_DAYS = 7;
+    private final Ec2CostOptimizer ec2CostOptimizer;
 
     public List<OptimizationResult> analyzeResources(AwsAccount account) {
         List<OptimizationResult> results = new ArrayList<>();
         
         try {
-            results.addAll(analyzeEC2Instances(account));
+            // Use the new Ec2CostOptimizer for EC2 analysis
+            results.addAll(ec2CostOptimizer.analyzeEc2Instances(account.getRegion()));
+            
+            // Continue with other resource analysis
             results.addAll(analyzeRDSInstances(account));
             results.addAll(analyzeS3Buckets(account));
             results.addAll(analyzeElastiCacheClusters(account));
@@ -48,96 +43,6 @@ public class AwsResourceAnalyzer {
         }
         
         return results;
-    }
-
-    private List<OptimizationResult> analyzeEC2Instances(AwsAccount account) {
-        List<OptimizationResult> results = new ArrayList<>();
-        
-        try (Ec2Client ec2Client = Ec2Client.builder()
-                .region(software.amazon.awssdk.regions.Region.of(account.getRegion()))
-                .build();
-             CloudWatchClient cloudWatchClient = CloudWatchClient.builder()
-                .region(software.amazon.awssdk.regions.Region.of(account.getRegion()))
-                .build()) {
-
-            DescribeInstancesResponse response = ec2Client.describeInstances();
-            
-            for (Reservation reservation : response.reservations()) {
-                for (Instance instance : reservation.instances()) {
-                    if (instance.state().name() == InstanceStateName.RUNNING) {
-                        // Check CPU utilization
-                        if (instance.monitoring().state() == MonitoringState.DISABLED) {
-                            OptimizationResult result = new OptimizationResult();
-                            result.setResourceType("EC2");
-                            result.setResourceId(instance.instanceId());
-                            result.setCurrentState("Instance running without detailed monitoring");
-                            result.setSuggestedAction("Enable detailed monitoring to track CPU utilization");
-                            result.setSeverity("MEDIUM");
-                            results.add(result);
-                        }
-
-                        // Check instance type optimization
-                        if (instance.instanceType().toString().startsWith("t2.")) {
-                            OptimizationResult result = new OptimizationResult();
-                            result.setResourceType("EC2");
-                            result.setResourceId(instance.instanceId());
-                            result.setCurrentState("Using burstable instance type");
-                            result.setSuggestedAction("Consider upgrading to t3 instance type for better performance");
-                            result.setSeverity("LOW");
-                            results.add(result);
-                        }
-
-                        // Check CPU utilization for last 7 days
-                        if (isInstanceUnderutilized(cloudWatchClient, instance.instanceId())) {
-                            OptimizationResult result = new OptimizationResult();
-                            result.setResourceType("EC2");
-                            result.setResourceId(instance.instanceId());
-                            result.setCurrentState("Low CPU utilization (< 20%) for the last 7 days");
-                            result.setSuggestedAction("Consider downsizing the instance to save costs");
-                            result.setSeverity("HIGH");
-                            results.add(result);
-                        }
-                    }
-                }
-            }
-        }
-        
-        return results;
-    }
-
-    private boolean isInstanceUnderutilized(CloudWatchClient cloudWatchClient, String instanceId) {
-        try {
-            Instant endTime = Instant.now();
-            Instant startTime = endTime.minus(LOOKBACK_DAYS, ChronoUnit.DAYS);
-
-            GetMetricStatisticsRequest request = GetMetricStatisticsRequest.builder()
-                .namespace("AWS/EC2")
-                .metricName("CPUUtilization")
-                .dimensions(Dimension.builder()
-                    .name("InstanceId")
-                    .value(instanceId)
-                    .build())
-                .startTime(startTime)
-                .endTime(endTime)
-                .period(3600) // 1 hour intervals
-                .statistics(Statistic.MAXIMUM)
-                .build();
-
-            GetMetricStatisticsResponse response = cloudWatchClient.getMetricStatistics(request);
-            
-            // Check if we have data points
-            if (response.datapoints().isEmpty()) {
-                return false;
-            }
-
-            // Check if any data point exceeds the threshold
-            return response.datapoints().stream()
-                .noneMatch(point -> point.maximum() > CPU_UTILIZATION_THRESHOLD);
-
-        } catch (Exception e) {
-            log.error("Error checking CPU utilization for instance {}: {}", instanceId, e.getMessage());
-            return false;
-        }
     }
 
     private List<OptimizationResult> analyzeRDSInstances(AwsAccount account) {
@@ -200,20 +105,6 @@ public class AwsResourceAnalyzer {
                     result.setSeverity("HIGH");
                     results.add(result);
                 }
-
-                // Check for lifecycle policies
-                GetBucketLifecycleConfigurationResponse lifecycleResponse = s3Client.getBucketLifecycleConfiguration(
-                    GetBucketLifecycleConfigurationRequest.builder().bucket(bucket.name()).build());
-                
-                if (lifecycleResponse.rules().isEmpty()) {
-                    OptimizationResult result = new OptimizationResult();
-                    result.setResourceType("S3");
-                    result.setResourceId(bucket.name());
-                    result.setCurrentState("No lifecycle policies");
-                    result.setSuggestedAction("Configure lifecycle policies to optimize storage costs");
-                    result.setSeverity("MEDIUM");
-                    results.add(result);
-                }
             }
         }
         
@@ -230,7 +121,7 @@ public class AwsResourceAnalyzer {
             DescribeCacheClustersResponse response = elasticacheClient.describeCacheClusters();
             
             for (CacheCluster cluster : response.cacheClusters()) {
-                // Check for multi-AZ using available methods
+                // Check for Redis cluster mode
                 if (cluster.engine().equals("redis") && !cluster.engineVersion().contains("cluster")) {
                     OptimizationResult result = new OptimizationResult();
                     result.setResourceType("ElastiCache");
@@ -238,17 +129,6 @@ public class AwsResourceAnalyzer {
                     result.setCurrentState("Single-node Redis deployment");
                     result.setSuggestedAction("Consider using Redis cluster mode for high availability");
                     result.setSeverity("HIGH");
-                    results.add(result);
-                }
-
-                // Check for backup retention
-                if (cluster.snapshotRetentionLimit() < 7) {
-                    OptimizationResult result = new OptimizationResult();
-                    result.setResourceType("ElastiCache");
-                    result.setResourceId(cluster.cacheClusterId());
-                    result.setCurrentState("Low backup retention");
-                    result.setSuggestedAction("Increase snapshot retention period");
-                    result.setSeverity("MEDIUM");
                     results.add(result);
                 }
             }
@@ -267,46 +147,15 @@ public class AwsResourceAnalyzer {
             DescribeLoadBalancersResponse response = elbClient.describeLoadBalancers();
             
             for (LoadBalancer lb : response.loadBalancers()) {
-                // Check for deletion protection using available methods
+                // Check for public load balancers
                 if (lb.state().code() == LoadBalancerStateEnum.ACTIVE && !lb.scheme().equals("internal")) {
                     OptimizationResult result = new OptimizationResult();
                     result.setResourceType("LoadBalancer");
                     result.setResourceId(lb.loadBalancerArn());
-                    result.setCurrentState("Public load balancer without deletion protection");
-                    result.setSuggestedAction("Enable deletion protection for public load balancers");
-                    result.setSeverity("HIGH");
+                    result.setCurrentState("Public load balancer");
+                    result.setSuggestedAction("Consider using internal load balancer if external access is not needed");
+                    result.setSeverity("MEDIUM");
                     results.add(result);
-                }
-
-                // Check for idle load balancers
-                if (lb.state().code() == LoadBalancerStateEnum.ACTIVE) {
-                    DescribeTargetGroupsResponse targetGroupsResponse = elbClient.describeTargetGroups(
-                        DescribeTargetGroupsRequest.builder()
-                            .loadBalancerArn(lb.loadBalancerArn())
-                            .build());
-
-                    boolean hasHealthyTargets = false;
-                    for (software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetGroup targetGroup : targetGroupsResponse.targetGroups()) {
-                        DescribeTargetHealthResponse healthResponse = elbClient.describeTargetHealth(
-                            DescribeTargetHealthRequest.builder()
-                                .targetGroupArn(targetGroup.targetGroupArn())
-                                .build());
-
-                        hasHealthyTargets = healthResponse.targetHealthDescriptions().stream()
-                            .anyMatch(health -> health.targetHealth().state() == TargetHealthStateEnum.HEALTHY);
-
-                        if (hasHealthyTargets) break;
-                    }
-
-                    if (!hasHealthyTargets) {
-                        OptimizationResult result = new OptimizationResult();
-                        result.setResourceType("LoadBalancer");
-                        result.setResourceId(lb.loadBalancerArn());
-                        result.setCurrentState("No healthy targets");
-                        result.setSuggestedAction("Consider removing idle load balancer if no longer needed");
-                        result.setSeverity("MEDIUM");
-                        results.add(result);
-                    }
                 }
             }
         }
@@ -324,13 +173,13 @@ public class AwsResourceAnalyzer {
             ListFunctionsResponse response = lambdaClient.listFunctions();
             
             for (FunctionConfiguration function : response.functions()) {
-                // Check for provisioned concurrency using available methods
-                if (function.memorySize() < 256 && function.timeout() > 30) {
+                // Check for memory allocation
+                if (function.memorySize() < 256) {
                     OptimizationResult result = new OptimizationResult();
                     result.setResourceType("Lambda");
                     result.setResourceId(function.functionName());
-                    result.setCurrentState("Low memory with high timeout");
-                    result.setSuggestedAction("Consider increasing memory allocation for better performance");
+                    result.setCurrentState("Low memory allocation");
+                    result.setSuggestedAction("Consider increasing memory for better performance");
                     result.setSeverity("MEDIUM");
                     results.add(result);
                 }
