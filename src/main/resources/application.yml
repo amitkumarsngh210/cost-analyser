@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: costwise
+  datasource:
+    url: jdbc:mysql://localhost:3306/costwise?createDatabaseIfNotExist=true
+    username: ${MYSQL_USER:costwise}
+    password: ${MYSQL_PASSWORD:costwise}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQL8Dialect
+
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+aws:
+  region: ${AWS_REGION:us-east-1}
+  credentials:
+    access-key: ${AWS_ACCESS_KEY:}
+    secret-key: ${AWS_SECRET_KEY:}
+
+security:
+  api-key:
+    header-name: X-API-Key
+    enabled: true
+
+logging:
+  level:
+    com.costwise: DEBUG
+    org.springframework.security: INFO
+    org.hibernate.SQL: DEBUG 

@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/costwise?createDatabaseIfNotExist=true
+      - SPRING_DATASOURCE_USERNAME=costwise
+      - SPRING_DATASOURCE_PASSWORD=costwise
+      - AWS_REGION=us-east-1
+    depends_on:
+      - mysql
+
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_DATABASE=costwise
+      - MYSQL_USER=costwise
+      - MYSQL_PASSWORD=costwise
+      - MYSQL_ROOT_PASSWORD=root
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  mysql_data: 
